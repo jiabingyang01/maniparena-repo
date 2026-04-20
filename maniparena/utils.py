@@ -80,16 +80,15 @@ def _extract_instruction(obs: Dict[str, Any]) -> str:
         return str(raw.flat[0]) if raw.size > 0 else ""
 
     if isinstance(raw, dict):
-        import pickle
-        data = raw.get("data", raw.get(b"data"))
-        if data is not None:
-            try:
-                arr = pickle.loads(data)
-                if isinstance(arr, np.ndarray) and arr.size > 0:
-                    return str(arr.flat[0])
-                return str(arr)
-            except Exception:
-                pass
+        # Msgpack-numpy encoded ndarray fallback (rare — only hit when
+        # msgpack-numpy is not properly installed/patched on the receiving side).
+        # We intentionally do NOT call pickle.loads here: the payload comes from
+        # remote websocket clients, and pickle deserialization on untrusted input
+        # is a remote code execution vector.
+        logger.warning(
+            "Received instruction as a serialized dict; ensure msgpack-numpy "
+            "is installed on the server. Returning empty instruction."
+        )
         return ""
 
     if isinstance(raw, (bytes, bytearray)):
