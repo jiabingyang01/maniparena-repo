@@ -25,3 +25,5 @@ Thumbs.db
 *.sh
 *.json
 .upload_done
+
+openloop_plots
