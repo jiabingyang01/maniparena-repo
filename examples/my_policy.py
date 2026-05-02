@@ -1,30 +1,109 @@
-"""Policy template — edit this file to plug in your model.
+"""OpenPI (pi0) policy for ManipArena bimanual tasks.
 
-Start the server with:
-    python serve.py --checkpoint /path/to/ckpt --port 8000
+Usage:
+    python serve.py \
+        --checkpoint /path/to/trained/checkpoint \
+        --control-mode end_pose \
+        --port 8000
 """
 
 from __future__ import annotations
 
+import base64
+import logging
 from typing import Any, Dict
 
+import cv2
+import numpy as np
+
 from maniparena.policy import ModelPolicy
-from maniparena.utils import convert_model_output_to_action, convert_observation_to_model_input
+
+logger = logging.getLogger(__name__)
+
+# ── Configuration ─────────────────────────────────────────────────
+# Change this to match your training config name in openpi.
+OPENPI_CONFIG_NAME = "pi0_maniparena_sim"
+DEFAULT_PROMPT = "complete the task"
+ACTION_END_RATIO = 0.8  # keep first 80% of predicted actions
+
+
+# ── Camera key mapping: ManipArena → OpenPI ─────────────────────
+_CAM_MAP = {
+    "camera_front": "observation.images.faceImg",
+    "camera_left": "observation.images.leftImg",
+    "camera_right": "observation.images.rightImg",
+}
+
+
+def _decode_image(v: Any) -> np.ndarray:
+    """base64 JPEG string or numpy array → RGB uint8 ndarray."""
+    if isinstance(v, np.ndarray):
+        return v.astype(np.uint8) if v.dtype != np.uint8 else v
+    raw = base64.b64decode(v) if isinstance(v, str) else bytes(v)
+    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("cv2.imdecode failed")
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+
+# ── Policy ────────────────────────────────────────────────────────
 
 
 class MyPolicy(ModelPolicy):
+    """OpenPI pi0 policy adapter for ManipArena bimanual (14D EE)."""
 
     def load_model(self, checkpoint_path: str, device: str) -> Any:
-        # TODO: load your model here and return it
-        raise NotImplementedError("Implement load_model()")
+        from openpi.policies import policy_config as pc
+        from openpi.training import config as train_config
 
-    def run_inference(self, model_input: Dict[str, Any]) -> Any:
-        # TODO: run forward pass, return np.ndarray of shape (action_horizon, 14)
-        raise NotImplementedError("Implement run_inference()")
+        cfg = train_config.get_config(OPENPI_CONFIG_NAME)
+        policy = pc.create_trained_policy(
+            cfg, checkpoint_path,
+            default_prompt=DEFAULT_PROMPT,
+            pytorch_device=device,
+        )
+        logger.info(f"OpenPI model loaded: config={OPENPI_CONFIG_NAME}")
+        return policy
 
     def convert_input(self, obs: Dict[str, Any]) -> Dict[str, Any]:
-        return convert_observation_to_model_input(obs, self.control_mode, decode_images=False)
+        """ManipArena observation → OpenPI observation dict."""
+        state_dict = obs.get("state", {})
+        f1 = np.asarray(state_dict.get("follow1_pos", np.zeros(7)), dtype=np.float32)[:7]
+        f2 = np.asarray(state_dict.get("follow2_pos", np.zeros(7)), dtype=np.float32)[:7]
+        state = np.concatenate([f1, f2]).astype(np.float32)
+
+        openpi_obs: Dict[str, Any] = {
+            "observation.state": state,
+            "prompt": obs.get("instruction", DEFAULT_PROMPT) or DEFAULT_PROMPT,
+        }
+
+        views = obs.get("views", {})
+        for client_key, openpi_key in _CAM_MAP.items():
+            raw = views.get(client_key)
+            if raw is not None:
+                openpi_obs[openpi_key] = _decode_image(raw)
+            else:
+                openpi_obs[openpi_key] = np.zeros((480, 640, 3), dtype=np.uint8)
+
+        return openpi_obs
+
+    def run_inference(self, model_input: Dict[str, Any]) -> Any:
+        result = self.model.infer(model_input)
+        return np.asarray(result["actions"], dtype=np.float32)
 
     def convert_output(self, model_output: Any) -> Dict[str, Any]:
-        # NOTE: output values must be Python lists (.tolist()), not numpy arrays.
-        return convert_model_output_to_action(model_output, self.control_mode, self.action_horizon)
+        """OpenPI actions (T, 14) → ManipArena response dict.
+
+        NOTE: values must be Python lists (.tolist()), not numpy arrays.
+        """
+        actions = model_output
+        end_idx = max(2, int(ACTION_END_RATIO * actions.shape[0]))
+        actions = actions[:end_idx]
+
+        left = actions[:, :7]
+        right = actions[:, 7:14]
+
+        return {
+            "follow1_pos": left.tolist(),
+            "follow2_pos": right.tolist(),
+        }
