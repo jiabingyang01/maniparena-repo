@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # ── Configuration ─────────────────────────────────────────────────
 # Change this to match your training config name in openpi.
-OPENPI_CONFIG_NAME = "pi0_maniparena_sim"
+OPENPI_CONFIG_NAME = "pi05_maniparena_preliminary"
 DEFAULT_PROMPT = "complete the task"
 ACTION_END_RATIO = 0.8  # keep first 80% of predicted actions
 
